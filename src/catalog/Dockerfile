@@ -1,8 +1,10 @@
-FROM golang:alpine AS build
+FROM golang:1.25-alpine AS build
 
 RUN apk add --no-cache \
     git \
-    ca-certificates
+    ca-certificates \
+    gcc \
+    musl-dev
 
 WORKDIR /build 
 
@@ -15,13 +17,24 @@ RUN go mod download \
 
 COPY . .
 
-RUN CGO_ENABLED=0 \
+RUN CGO_ENABLED=1 \
     GOOS=linux \
     go build \
     -trimpath \
     -ldflags="-s -w" \
     -o /out/main .
-FROM alpine:latest AS runtime
+FROM alpine:3.22 AS runtime
+
+ARG BUILD_VERSION=dev
+ARG BUILD_REVISION=unknown
+ARG BUILD_DATE=unknown
+
+LABEL org.opencontainers.image.title="retail-catalog" \
+      org.opencontainers.image.description="Catalog microservice for the retail store application" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.revision="${BUILD_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="https://github.com/ahmedmohsen5/retail-store-sample-app"
 
 RUN apk add --no-cache ca-certificates curl
 
