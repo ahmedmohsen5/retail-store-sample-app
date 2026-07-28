@@ -1,40 +1,39 @@
 FROM node:20-alpine AS build
-WORKDIR /usr/src/app
-COPY --chown=node:node package*.json ./
-COPY --chown=node:node . .
-RUN yarn install --frozen-lockfile
-RUN yarn build
-USER node
 
+WORKDIR /build
 
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+COPY package.json ./
 
-# We tell DNF not to install Recommends and Suggests packages, which are
-# weak dependencies in DNF terminology, thus keeping our installed set of
-# packages as minimal as possible.
-RUN dnf --setopt=install_weak_deps=False install -q -y \
-    nodejs20 \
-    shadow-utils \
-    && \
-    dnf clean all
+RUN npm install
 
-RUN alternatives --install /usr/bin/node node /usr/bin/node-20 90
+COPY . .
 
-ENV APPUSER=appuser
-ENV APPUID=1000
-ENV APPGID=1000
+RUN npm run build
 
-RUN useradd \
-    --home "/app" \
-    --create-home \
-    --user-group \
-    --uid "$APPUID" \
-    "$APPUSER"
+FROM node:20-alpine AS runtime
+
+ENV NODE_ENV=production
 
 WORKDIR /app
-USER appuser
 
-COPY --chown=node:node --from=build /usr/src/app/node_modules ./node_modules
-COPY --chown=node:node --from=build /usr/src/app/dist ./dist
+RUN chown node:node /app
 
-ENTRYPOINT [ "node", "dist/main.js" ]
+COPY --chown=node:node package.json ./
+
+
+
+RUN npm install --omit=dev \
+    && npm cache clean --force\
+    && apk add --no-cache \
+        curl \
+        ca-certificates
+
+COPY --chown=node:node \
+    --from=build \
+    /build/dist \
+    ./dist
+USER node
+
+EXPOSE 8080
+
+ENTRYPOINT ["node", "dist/main.js"]
