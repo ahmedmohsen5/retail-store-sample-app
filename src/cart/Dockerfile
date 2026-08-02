@@ -17,7 +17,16 @@ RUN ./mvnw clean package -DskipTests -B \
     && cp target/*.jar /app.jar
 
 FROM eclipse-temurin:21-jre-alpine AS runtime
+ARG BUILD_VERSION=dev
+ARG BUILD_REVISION=unknown
+ARG BUILD_DATE=unknown
 
+LABEL org.opencontainers.image.title="retail-carts" \
+      org.opencontainers.image.description="Carts microservice for the retail store application" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.revision="${BUILD_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="https://github.com/ahmedmohsen5/retail-store-sample-app"
 RUN addgroup -S appgroup \
     && adduser -S appuser -G appgroup -h /app \
     && apk add --no-cache \
