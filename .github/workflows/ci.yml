@@ -203,11 +203,11 @@ jobs:
           set -o pipefail
           npm test 2>&1 | tee "$RUNNER_TEMP/checkout-test.log"
           npm run build 
-      - name: setup go 1.21
+      - name: setup go 1.25.13
         if: matrix.service == 'catalog'
         uses: actions/setup-go@v7
         with:
-          go-version-file: src/catalog/go.mod
+          go-version: '1.25.13'
           cache: true
           cache-dependency-path: src/catalog/go.sum
       - name: validate catalog service
