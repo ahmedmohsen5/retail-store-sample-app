@@ -304,7 +304,7 @@ jobs:
           retention-days: 14
       - name: save approved image
         run: |
-          IMAGE = "retail-${{matrix.service}}:sha-${{steps.image_meta.outputs.short_sha}}"
+          IMAGE="retail-${{ matrix.service }}:sha-${{ steps.image_meta.outputs.short_sha }}"
           ARTIFACT_DIR="$RUNNER_TEMP/approved-image"
 
           mkdir -p "$ARTIFACT_DIR"
@@ -462,8 +462,8 @@ jobs:
         id: release_meta
         shell: bash
         run: |
-          SERVICE= "${{matrix.service}}"
-          SHORT_SHA="${GITHUB.SHA::12}"
+          SERVICE="${{ matrix.service}}"
+          SHORT_SHA="${GITHUB_SHA::12}"
           SHA_TAG="sha-${SHORT_SHA}"
           RELEASE_TAG="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           
@@ -497,16 +497,21 @@ jobs:
       - name: Tag approved image for ECR
         run: |
           docker tag \
-            "${{steps.release_meta.outputs.local_image}}" \
-            "${{steps.release_meta.outputs.repository_uri}}:${{steps.release_meta.outputs.release_tag}}"
+            "${{ steps.release_meta.outputs.local_image }}" \
+            "${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.sha_tag }}"
+
+          docker tag \
+            "${{ steps.release_meta.outputs.local_image }}" \
+            "${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.release_tag }}"
+
       - name: Push approved image
         id: push
         shell: bash
         run: |
           SHA_IMAGE="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.sha_tag }}"
           RELEASE_IMAGE="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.release_tag }}"
-          PUSH_OUTPUT= $(docker push "$SHA_IMAGE" )
-          echo PUSH_OUTPUT
+          PUSH_OUTPUT=$(docker push "$SHA_IMAGE" )
+          echo "$PUSH_OUTPUT"
           PIPELINE_DIGEST=$(printf '%s\n' "$PUSH_OUTPUT" \
           | awk '/digest:/ {print $3}' \
           | tail -1)
