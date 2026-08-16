@@ -203,11 +203,11 @@ jobs:
           set -o pipefail
           npm test 2>&1 | tee "$RUNNER_TEMP/checkout-test.log"
           npm run build 
-      - name: setup go 1.21
+      - name: setup go 1.25.13
         if: matrix.service == 'catalog'
         uses: actions/setup-go@v7
         with:
-          go-version-file: src/catalog/go.mod
+          go-version: '1.25.13'
           cache: true
           cache-dependency-path: src/catalog/go.sum
       - name: validate catalog service
@@ -242,6 +242,7 @@ jobs:
         run: |
           echo "short_sha=${GITHUB_SHA::12}" >> $GITHUB_OUTPUT
           echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "release_tag=run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - name: build service image
         uses: docker/build-push-action@v7
         with:
@@ -251,9 +252,11 @@ jobs:
           tags: retail-${{ matrix.service }}:sha-${{ steps.image_meta.outputs.short_sha }}
           load: true
           labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ steps.image_meta.outputs.created }}
+             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+             org.opencontainers.image.revision=${{ github.sha }}
+             org.opencontainers.image.created=${{ steps.image_meta.outputs.created }}
+             org.opencontainers.image.version=${{ steps.image_meta.outputs.release_tag }}
+
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
       - name: verify service image
@@ -299,6 +302,30 @@ jobs:
             trivy-image-${{ matrix.service }}.sarif
           if-no-files-found: warn
           retention-days: 14
+      - name: save approved image
+        run: |
+          IMAGE="retail-${{ matrix.service }}:sha-${{ steps.image_meta.outputs.short_sha }}"
+          ARTIFACT_DIR="$RUNNER_TEMP/approved-image"
+
+          mkdir -p "$ARTIFACT_DIR"
+
+          docker save "$IMAGE" \
+            --output "$ARTIFACT_DIR/${{ matrix.service }}.tar"
+
+          cd "$ARTIFACT_DIR"
+
+          sha256sum "${{ matrix.service }}.tar" \
+            > "${{ matrix.service }}.tar.sha256"
+      - name: upload approved image
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: approved-image-${{ matrix.service }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/approved-image/${{ matrix.service }}.tar
+            ${{ runner.temp }}/approved-image/${{ matrix.service }}.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   no-service-changes:
     name: No application changes
     needs: detect
@@ -386,3 +413,188 @@ jobs:
           fi
 
           echo "Release gate passed. No security issues or service CI failures detected."
+  release:
+    name: Publish - ${{ matrix.service }}   
+    needs: 
+      - detect
+      - service-ci
+      - repository-security
+      - security-gate 
+    if: > 
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/develop' &&
+      needs.detect.outputs.has_changes == 'true' &&
+      needs.service-ci.result == 'success' &&
+      needs.repository-security.result == 'success' &&
+      needs.security-gate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions: 
+      contents: read
+      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: login to amazon ecr 
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2.1.6
+        with:
+          mask-password: true
+      
+      - name: download docker images 
+        uses: actions/download-artifact@v8.0.1
+        with:
+           name: approved-image-${{ matrix.service }}-${{ github.sha }}
+           path: ${{ runner.temp }}/approved-image
+      - name:  Verify and load approved image
+        run: | 
+          cd "$RUNNER_TEMP/approved-image"
+          sha256sum -c "${{ matrix.service }}.tar.sha256"
+          docker load --input "${{matrix.service}}.tar"
+      - name: Prepare release references
+        id: release_meta
+        shell: bash
+        run: |
+          SERVICE="${{ matrix.service}}"
+          SHORT_SHA="${GITHUB_SHA::12}"
+          SHA_TAG="sha-${SHORT_SHA}"
+          RELEASE_TAG="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          
+
+            case "$SERVICE" in
+            cart)
+              REPOSITORY_NAME="retail-carts"
+              ;;
+            catalog|checkout|orders|ui)
+              REPOSITORY_NAME="retail-${SERVICE}"
+              ;;
+            *)
+              echo "Unsupported service: $SERVICE"
+              exit 1
+              ;;
+          esac
+
+          REPOSITORY_URI=$(aws ecr describe-repositories \
+            --repository-names "$REPOSITORY_NAME" \
+            --query 'repositories[0].repositoryUri' \
+            --output text)
+
+          LOCAL_IMAGE="retail-${SERVICE}:${SHA_TAG}"
+
+          echo "repository_name=$REPOSITORY_NAME" >> "$GITHUB_OUTPUT"
+          echo "repository_uri=$REPOSITORY_URI" >> "$GITHUB_OUTPUT"
+          echo "local_image=$LOCAL_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=$SHA_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Tag approved image for ECR
+        run: |
+          docker tag \
+            "${{ steps.release_meta.outputs.local_image }}" \
+            "${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.sha_tag }}"
+
+          docker tag \
+            "${{ steps.release_meta.outputs.local_image }}" \
+            "${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.release_tag }}"
+
+      - name: Push approved image
+        id: push
+        shell: bash
+        run: |
+          SHA_IMAGE="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.sha_tag }}"
+          RELEASE_IMAGE="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.release_tag }}"
+          PUSH_OUTPUT=$(docker push "$SHA_IMAGE" )
+          echo "$PUSH_OUTPUT"
+          PIPELINE_DIGEST=$(printf '%s\n' "$PUSH_OUTPUT" \
+          | awk '/digest:/ {print $3}' \
+          | tail -1)
+
+          if [ -z "$PIPELINE_DIGEST" ]; then
+            echo "Could not determine pushed digest."
+            exit 1
+          fi
+
+          docker push "$RELEASE_IMAGE"
+
+          echo "pipeline_digest=$PIPELINE_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Verify ECR digest
+        id: digest
+        shell: bash
+        run: |
+          ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ steps.release_meta.outputs.repository_name }}" \
+            --image-ids imageTag="${{ steps.release_meta.outputs.sha_tag }}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          PIPELINE_DIGEST="${{ steps.push.outputs.pipeline_digest }}"
+
+          echo "Pipeline digest: $PIPELINE_DIGEST"
+          echo "ECR digest:      $ECR_DIGEST"
+
+          if [ "$PIPELINE_DIGEST" != "$ECR_DIGEST" ]; then
+            echo "Digest mismatch."
+            exit 1
+          fi
+
+          echo "Digest verified successfully."
+
+          echo "ecr_digest=$ECR_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Pull published image and verify digest
+        shell: bash
+        run: |
+            IMAGE_URI="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.sha_tag }}"
+
+            docker image rm "$IMAGE_URI" || true
+            docker image rm "${{ steps.release_meta.outputs.local_image }}" || true
+
+            docker pull "$IMAGE_URI"
+
+            PULLED_REPO_DIGEST=$(docker image inspect "$IMAGE_URI" \
+              --format '{{index .RepoDigests 0}}')
+
+            PULLED_DIGEST="${PULLED_REPO_DIGEST##*@}"
+
+            EXPECTED_DIGEST="${{ steps.digest.outputs.ecr_digest }}"
+
+            echo "Pulled digest:   $PULLED_DIGEST"
+            echo "Expected digest: $EXPECTED_DIGEST"
+
+            if [ "$PULLED_DIGEST" != "$EXPECTED_DIGEST" ]; then
+              echo "Pulled image digest mismatch."
+              exit 1
+            fi
+
+            echo "Pulled image digest verified."
+      - name: Verify release tag is immutable
+        shell: bash
+        run: |
+          RELEASE_IMAGE="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.release_tag }}"
+
+          echo "Attempting a second push to existing immutable tag: $RELEASE_IMAGE"
+
+          if docker push "$RELEASE_IMAGE"; then
+            echo "ERROR: Existing release tag accepted another push."
+            exit 1
+          else
+            echo "Expected failure: immutable release tag cannot be overwritten."
+          fi
+      - name: Print release evidence
+        run: |
+          echo "Service:        ${{ matrix.service }}"
+          echo "Repository:     ${{ steps.release_meta.outputs.repository_uri }}"
+          echo "SHA tag:        ${{ steps.release_meta.outputs.sha_tag }}"
+          echo "Release tag:    ${{ steps.release_meta.outputs.release_tag }}"
+          echo "Digest:         ${{ steps.digest.outputs.ecr_digest }}"
+          echo "Commit:         ${{ github.sha }}"
+          echo "Run ID:         ${{ github.run_id }}"
+    
+
+
