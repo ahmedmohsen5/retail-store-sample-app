@@ -27,7 +27,7 @@ jobs:
             - name: verify ecr reps
               run: aws ecr describe-repositories \
                     --repository-names \
-                      retail-cart \
+                      retail-carts \
                       retail-catalog \
                       retail-checkout \
                       retail-orders \
