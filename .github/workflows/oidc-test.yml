@@ -25,11 +25,6 @@ jobs:
             - name: verify assume aws identity
               run: aws sts get-caller-identity
             - name: verify ecr reps
-              run: aws ecr describe-repositories \
-                    --repository-names \
-                      retail-cart \
-                      retail-catalog \
-                      retail-checkout \
-                      retail-orders \
-                      retail-ui
+              run: aws ecr describe-repositories --repository-names retail-carts retail-catalog retail-checkout retail-orders retail-ui
+                      
     
