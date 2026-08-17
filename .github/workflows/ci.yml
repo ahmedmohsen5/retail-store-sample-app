@@ -577,16 +577,76 @@ jobs:
       - name: Verify release tag is immutable
         shell: bash
         run: |
-          RELEASE_IMAGE="${{ steps.release_meta.outputs.repository_uri }}:${{ steps.release_meta.outputs.release_tag }}"
+          set -euo pipefail
 
-          echo "Attempting a second push to existing immutable tag: $RELEASE_IMAGE"
+          REPOSITORY_NAME="${{ steps.release_meta.outputs.repository_name }}"
+          REPOSITORY_URI="${{ steps.release_meta.outputs.repository_uri }}"
+          SHA_TAG="${{ steps.release_meta.outputs.sha_tag }}"
+          RELEASE_TAG="${{ steps.release_meta.outputs.release_tag }}"
 
-          if docker push "$RELEASE_IMAGE"; then
-            echo "ERROR: Existing release tag accepted another push."
+          SOURCE_IMAGE="${REPOSITORY_URI}:${SHA_TAG}"
+          RELEASE_IMAGE="${REPOSITORY_URI}:${RELEASE_TAG}"
+
+          EXPECTED_DIGEST="${{ steps.digest.outputs.ecr_digest }}"
+
+          MUTABILITY=$(aws ecr describe-repositories \
+            --repository-names "$REPOSITORY_NAME" \
+            --query 'repositories[0].imageTagMutability' \
+            --output text)
+
+          echo "Repository mutability: $MUTABILITY"
+
+          if [ "$MUTABILITY" != "IMMUTABLE" ]; then
+            echo "ERROR: Repository is not IMMUTABLE."
             exit 1
-          else
-            echo "Expected failure: immutable release tag cannot be overwritten."
           fi
+
+          TEST_CONTAINER=$(docker create "$SOURCE_IMAGE")
+
+          TEST_IMAGE="immutability-test:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.service }}"
+
+          docker commit \
+            --change 'LABEL devops.day15.immutability-test=true' \
+            "$TEST_CONTAINER" \
+            "$TEST_IMAGE" > /dev/null
+
+          docker rm "$TEST_CONTAINER" > /dev/null
+
+          docker tag "$TEST_IMAGE" "$RELEASE_IMAGE"
+
+          echo "Attempting to overwrite immutable tag with a DIFFERENT image:"
+          echo "$RELEASE_IMAGE"
+
+          set +e
+
+          PUSH_OUTPUT=$(docker push "$RELEASE_IMAGE" 2>&1)
+          PUSH_STATUS=$?
+
+          set -e
+
+          echo "$PUSH_OUTPUT"
+
+          if [ "$PUSH_STATUS" -eq 0 ]; then
+            echo "ERROR: Immutable tag was overwritten."
+            exit 1
+          fi
+
+          AFTER_DIGEST=$(aws ecr describe-images \
+            --repository-name "$REPOSITORY_NAME" \
+            --image-ids imageTag="$RELEASE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          echo "Expected digest: $EXPECTED_DIGEST"
+          echo "Digest after overwrite attempt: $AFTER_DIGEST"
+
+          if [ "$AFTER_DIGEST" != "$EXPECTED_DIGEST" ]; then
+            echo "ERROR: Release tag digest changed."
+            exit 1
+          fi
+
+          echo "SUCCESS: Immutable tag rejected the different image."
+          echo "SUCCESS: Existing release digest remained unchanged."
       - name: Print release evidence
         run: |
           echo "Service:        ${{ matrix.service }}"
